@@ -1,4 +1,5 @@
-import { WorkflowEntrypoint, Container } from 'cloudflare:workers';
+import { WorkflowEntrypoint } from "cloudflare:workers";
+import { Container, getContainer } from "@cloudflare/containers";;
 
 // ── Контейнер ────────────────────────────────────────────
 
