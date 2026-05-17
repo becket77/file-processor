@@ -1,6 +1,6 @@
 name = "file-processor"
 main = "src/index.js"
-compatibility_date = "2024-01-01"
+compatibility_date = "2025-06-01"
 
 [[r2_buckets]]
 binding = "FILES"
@@ -28,3 +28,4 @@ class_name = "ReportContainer"
 image = "../processor/Dockerfile"
 max_instances = 5
 instance_type = "standard-1"
+compatibility_flags = ["nodejs_compat"]
