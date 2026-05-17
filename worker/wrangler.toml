@@ -1,0 +1,30 @@
+name = "file-processor"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "file-processor-files"
+
+[[kv_namespaces]]
+binding = "JOBS"
+id = "770aa8777aee45c1a0986027d2caf4e8"
+
+[[workflows]]
+binding = "REPORT_WORKFLOW"
+name = "report-workflow"
+class_name = "ReportWorkflow"
+
+[[durable_objects.bindings]]
+name = "REPORT_CONTAINER"
+class_name = "ReportContainer"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ReportContainer"]
+
+[[containers]]
+class_name = "ReportContainer"
+image = "../processor/Dockerfile"
+max_instances = 5
+instance_type = "standard-1"
