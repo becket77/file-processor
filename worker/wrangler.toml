@@ -28,4 +28,3 @@ class_name = "ReportContainer"
 image = "../processor/Dockerfile"
 max_instances = 5
 instance_type = "standard-1"
-compatibility_flags = ["nodejs_compat"]

@@ -25,11 +25,6 @@ async function getToken(env) {
   return data.tkn;
 }
 
-function getContainer(env, id) {
-  return env.REPORT_CONTAINER.get(
-    env.REPORT_CONTAINER.idFromName(id)
-  );
-}
 
 // ── Workflow ─────────────────────────────────────────────
 
