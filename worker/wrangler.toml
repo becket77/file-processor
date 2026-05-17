@@ -25,6 +25,6 @@ new_sqlite_classes = ["ReportContainer"]
 
 [[containers]]
 class_name = "ReportContainer"
-image = "../processor/Dockerfile"
+image = "docker.io/borisko779/file-processor:latest"
 max_instances = 5
 instance_type = "standard-1"
