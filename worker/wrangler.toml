@@ -23,9 +23,8 @@ class_name = "ReportContainer"
 tag = "v1"
 new_sqlite_classes = ["ReportContainer"]
 
-# containers временно отключены — создать вручную в Dashboard
 [[containers]]
 class_name = "ReportContainer"
-image = "docker.io/borisko779/file-processor:latest"
+image = "docker.io/borisko779/file-processor:sha-placeholder"
 max_instances = 5
 instance_type = "standard-1"
