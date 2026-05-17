@@ -88,7 +88,6 @@ jobs:
         run: |
           printf '%s' '${{ secrets.GITHUB_TOKEN }}' | \
           npx wrangler containers registries configure ghcr.io \
-            --username=becket77 \
             --secret-name=ghcr-token \
             --skip-confirmation
         env:
