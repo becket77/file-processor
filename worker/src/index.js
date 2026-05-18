@@ -107,7 +107,7 @@ export class ReportWorkflow extends WorkflowEntrypoint {
     const reportResult = await step.do('generate-report', {
       retries: { limit: 2, delay: '10 seconds' }
     }, async () => {
-      const container = getContainer(this.env, jobId);
+      const container = getContainer(this.env.REPORT_CONTAINER, jobId);
 
       const response = await container.fetch('http://container/generate-report', {
         method: 'POST',
@@ -165,7 +165,7 @@ export default {
         const jobId = crypto.randomUUID();
 
         // Парсинг файла в контейнере
-        const container = getContainer(env, `parse-${jobId}`);
+        const container = getContainer(env.REPORT_CONTAINER, `parse-${jobId}`);
         const parseForm = new FormData();
         parseForm.append('file', file);
         parseForm.append('jobId', jobId);
