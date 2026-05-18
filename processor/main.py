@@ -9,9 +9,8 @@ from email.mime.base import MIMEBase
 from email.mime.text import MIMEText
 from email import encoders
 
-import boto3
 import openpyxl
-from fastapi import FastAPI, UploadFile, Form
+from fastapi import FastAPI, UploadFile
 from fastapi.responses import JSONResponse
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -20,16 +19,9 @@ from reportlab.lib.styles import getSampleStyleSheet
 
 app = FastAPI()
 
-s3 = boto3.client(
-    's3',
-    endpoint_url=os.environ['R2_ENDPOINT'],
-    aws_access_key_id=os.environ['R2_ACCESS_KEY'],
-    aws_secret_access_key=os.environ['R2_SECRET_KEY'],
-    region_name='auto'
-)
-BUCKET = os.environ['R2_BUCKET']
-
 GS = '\x1d'
+
+# ── Парсеры ──────────────────────────────────────────────
 
 def extract_code(raw: str) -> str | None:
     code = raw.split(GS)[0].strip()
@@ -76,6 +68,8 @@ def parse_xls(content: bytes) -> list[str]:
         if code:
             codes.append(code)
     return codes
+
+# ── Агрегация ────────────────────────────────────────────
 
 def fmt_date(d: str | None) -> str:
     if not d:
@@ -126,20 +120,19 @@ def aggregate(items: list[dict]) -> dict:
 
     total = len(items)
     return {
-        'items': items,
-        'summary': {
-            'total': total,
-            'found': total - not_found,
-            'notFound': not_found,
-            'byStatus': dict(sorted(by_status.items(), key=lambda x: -x[1])),
-            'byOwner': dict(sorted(by_owner.items(), key=lambda x: -x[1])[:50]),
-            'byProductGroup': dict(sorted(by_product_group.items(), key=lambda x: -x[1])),
-            'byBrand': dict(sorted(by_brand.items(), key=lambda x: -x[1])[:50]),
-            'byEmissionDate': dict(sorted(by_emission_date.items())),
-            'byProducedDate': dict(sorted(by_produced_date.items())),
-            'errors': dict(sorted(errors.items(), key=lambda x: -x[1])),
-        }
+        'total': total,
+        'found': total - not_found,
+        'notFound': not_found,
+        'byStatus': dict(sorted(by_status.items(), key=lambda x: -x[1])),
+        'byOwner': dict(sorted(by_owner.items(), key=lambda x: -x[1])[:50]),
+        'byProductGroup': dict(sorted(by_product_group.items(), key=lambda x: -x[1])),
+        'byBrand': dict(sorted(by_brand.items(), key=lambda x: -x[1])[:50]),
+        'byEmissionDate': dict(sorted(by_emission_date.items())),
+        'byProducedDate': dict(sorted(by_produced_date.items())),
+        'errors': dict(sorted(errors.items(), key=lambda x: -x[1])),
     }
+
+# ── PDF ──────────────────────────────────────────────────
 
 HEADER_COLOR = colors.HexColor('#0051c3')
 ROW_COLORS = [colors.white, colors.HexColor('#f5f5f5')]
@@ -165,8 +158,7 @@ def section(elements, title, data, col_widths, styles):
     elements.append(make_table(data, col_widths))
     elements.append(Spacer(1, 14))
 
-def generate_pdf(job_id: str, report: dict) -> bytes:
-    summary = report['summary']
+def generate_pdf(job_id: str, summary: dict) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4,
                             rightMargin=35, leftMargin=35,
@@ -174,74 +166,78 @@ def generate_pdf(job_id: str, report: dict) -> bytes:
     styles = getSampleStyleSheet()
     el = []
 
-    el.append(Paragraph('Otchet po kodam markirovki', styles['Title']))
+    el.append(Paragraph('Report: Codes Check', styles['Title']))
     el.append(Paragraph(f'Job ID: {job_id}', styles['Normal']))
     el.append(Spacer(1, 14))
 
-    section(el, 'Svodnaya', [
-        ['Pokazatel', 'Znachenie'],
-        ['Vsego kodov', str(summary['total'])],
-        ['Naydeno', str(summary['found'])],
-        ['Ne naydeno', str(summary['notFound'])],
+    section(el, 'Summary', [
+        ['Parameter', 'Value'],
+        ['Total codes', str(summary['total'])],
+        ['Found', str(summary['found'])],
+        ['Not found', str(summary['notFound'])],
     ], [330, 150], styles)
 
     if summary['byStatus']:
-        section(el, 'Po statusam',
-            [['Status', 'Kolichestvo']] +
+        section(el, 'By status',
+            [['Status', 'Count']] +
             [[k, str(v)] for k, v in summary['byStatus'].items()],
             [330, 150], styles)
 
-    if summary['errors']:
-        section(el, 'Oshibki API',
-            [['Kod oshibki', 'Kolichestvo']] +
+    if summary.get('errors'):
+        section(el, 'API errors',
+            [['Error code', 'Count']] +
             [[k, str(v)] for k, v in summary['errors'].items()],
             [330, 150], styles)
 
     if summary['byProductGroup']:
-        section(el, 'Po tovarnym gruppam',
-            [['Gruppa', 'Kolichestvo']] +
+        section(el, 'By product group',
+            [['Group', 'Count']] +
             [[k, str(v)] for k, v in summary['byProductGroup'].items()],
             [330, 150], styles)
 
     if summary['byOwner']:
-        section(el, 'Po vladeltsam (top 50)',
-            [['Vladetels', 'Kolichestvo']] +
+        section(el, 'By owner (top 50)',
+            [['Owner', 'Count']] +
             [[k, str(v)] for k, v in summary['byOwner'].items()],
             [380, 100], styles)
 
     if summary['byBrand']:
-        section(el, 'Po brendam (top 50)',
-            [['Brend', 'Kolichestvo']] +
+        section(el, 'By brand (top 50)',
+            [['Brand', 'Count']] +
             [[k, str(v)] for k, v in summary['byBrand'].items()],
             [380, 100], styles)
 
     if summary['byEmissionDate']:
-        section(el, 'Po date emissii',
-            [['Mesyats', 'Kolichestvo']] +
+        section(el, 'By emission date',
+            [['Month', 'Count']] +
             [[k, str(v)] for k, v in summary['byEmissionDate'].items()],
             [330, 150], styles)
 
     if summary['byProducedDate']:
-        section(el, 'Po date proizvodstva',
-            [['Mesyats', 'Kolichestvo']] +
+        section(el, 'By production date',
+            [['Month', 'Count']] +
             [[k, str(v)] for k, v in summary['byProducedDate'].items()],
             [330, 150], styles)
 
     doc.build(el)
     return buf.getvalue()
 
-def send_email(to: str, job_id: str, summary: dict, pdf_bytes: bytes):
+# ── Email ────────────────────────────────────────────────
+
+def send_email_report(to: str, job_id: str, summary: dict, pdf_bytes: bytes,
+                      smtp_host: str, smtp_port: int, smtp_user: str,
+                      smtp_pass: str, smtp_from: str):
     msg = MIMEMultipart()
-    msg['From'] = os.environ['SMTP_FROM']
+    msg['From'] = smtp_from
     msg['To'] = to
-    msg['Subject'] = f'Otchet po kodam markirovki - {summary["total"]} zapisey'
+    msg['Subject'] = f'Codes check report - {summary["total"]} records'
 
     body = (
-        f'Obrabotka zavershena.\n\n'
-        f'Vsego kodov: {summary["total"]}\n'
-        f'Naydeno: {summary["found"]}\n'
-        f'Ne naydeno: {summary["notFound"]}\n\n'
-        f'Podrobny otchet vo vlozhenii.'
+        f'Processing complete.\n\n'
+        f'Total codes: {summary["total"]}\n'
+        f'Found:       {summary["found"]}\n'
+        f'Not found:   {summary["notFound"]}\n\n'
+        f'Full report attached.'
     )
     msg.attach(MIMEText(body, 'plain', 'utf-8'))
 
@@ -251,13 +247,16 @@ def send_email(to: str, job_id: str, summary: dict, pdf_bytes: bytes):
     part.add_header('Content-Disposition', f'attachment; filename="report-{job_id}.pdf"')
     msg.attach(part)
 
-    with smtplib.SMTP(os.environ['SMTP_HOST'], int(os.environ['SMTP_PORT'])) as srv:
+    with smtplib.SMTP(smtp_host, smtp_port) as srv:
         srv.starttls()
-        srv.login(os.environ['SMTP_USER'], os.environ['SMTP_PASS'])
+        srv.login(smtp_user, smtp_pass)
         srv.send_message(msg)
 
+# ── Endpoints ────────────────────────────────────────────
+
 @app.post('/parse')
-async def parse_file(file: UploadFile, jobId: str = Form(...)):
+async def parse_file(file: UploadFile):
+    """Принимает файл, возвращает массив кодов"""
     content = await file.read()
     name = file.filename.lower()
 
@@ -271,35 +270,43 @@ async def parse_file(file: UploadFile, jobId: str = Form(...)):
         return JSONResponse({'error': f'Unsupported format: {name}'}, status_code=400)
 
     codes = list(dict.fromkeys(codes))
+    return {'codes': codes, 'count': len(codes)}
 
-    key = f'codes/{jobId}/codes.json'
-    s3.put_object(Bucket=BUCKET, Key=key, Body=json.dumps(codes, ensure_ascii=False))
-
-    return {'codesKey': key, 'count': len(codes)}
 
 @app.post('/generate-report')
 async def generate_report(payload: dict):
+    """Принимает items от CRPT, возвращает PDF как base64 + summary"""
+    import base64
+
     job_id = payload['jobId']
-    report = aggregate(payload['items'])
-
-    pdf_bytes = generate_pdf(job_id, report)
-    pdf_key = f'reports/{job_id}/report.pdf'
-    s3.put_object(Bucket=BUCKET, Key=pdf_key, Body=pdf_bytes, ContentType='application/pdf')
-
+    items = payload['items']
     email = payload.get('email')
-    if email:
+    smtp = payload.get('smtp')
+
+    summary = aggregate(items)
+    pdf_bytes = generate_pdf(job_id, summary)
+
+    if email and smtp:
         try:
-            send_email(email, job_id, report['summary'], pdf_bytes)
+            send_email_report(
+                to=email,
+                job_id=job_id,
+                summary=summary,
+                pdf_bytes=pdf_bytes,
+                smtp_host=smtp['host'],
+                smtp_port=int(smtp['port']),
+                smtp_user=smtp['user'],
+                smtp_pass=smtp['pass'],
+                smtp_from=smtp['from'],
+            )
         except Exception as e:
             print(f'Email error: {e}')
 
-    s3.put_object(
-        Bucket=BUCKET,
-        Key=f'reports/{job_id}/summary.json',
-        Body=json.dumps(report['summary'], ensure_ascii=False)
-    )
+    return {
+        'summary': summary,
+        'pdf': base64.b64encode(pdf_bytes).decode('utf-8')
+    }
 
-    return {'pdfKey': pdf_key, 'summary': report['summary']}
 
 @app.get('/health')
 async def health():

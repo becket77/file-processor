@@ -1,27 +1,11 @@
-import { WorkflowEntrypoint } from "cloudflare:workers";
-import { Container, getContainer } from "@cloudflare/containers";;
+import { WorkflowEntrypoint } from 'cloudflare:workers';
+import { Container, getContainer } from '@cloudflare/containers';
 
 // ── Контейнер ────────────────────────────────────────────
 
 export class ReportContainer extends Container {
   defaultPort = 8000;
   sleepAfter = '5m';
-
-  async containerStart() {
-    await this.startAndWaitForPorts({
-      envVars: {
-        R2_ENDPOINT:   this.env.R2_ENDPOINT,
-        R2_ACCESS_KEY: this.env.R2_ACCESS_KEY,
-        R2_SECRET_KEY: this.env.R2_SECRET_KEY,
-        R2_BUCKET:     this.env.R2_BUCKET,
-        SMTP_HOST:     this.env.SMTP_HOST,
-        SMTP_PORT:     this.env.SMTP_PORT,
-        SMTP_USER:     this.env.SMTP_USER,
-        SMTP_PASS:     this.env.SMTP_PASS,
-        SMTP_FROM:     this.env.SMTP_FROM,
-      }
-    });
-  }
 }
 
 // ── Вспомогательные функции ──────────────────────────────
@@ -41,6 +25,12 @@ async function getToken(env) {
   return data.tkn;
 }
 
+function base64ToArrayBuffer(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
 
 // ── Workflow ─────────────────────────────────────────────
 
@@ -81,31 +71,27 @@ export class ReportWorkflow extends WorkflowEntrypoint {
           body: JSON.stringify(chunks[i])
         });
 
-        if (!response.ok) {
-          throw new Error(`CRPT API error: ${response.status}`);
-        }
-
+        if (!response.ok) throw new Error(`CRPT API error: ${response.status}`);
         return response.json();
       });
 
-      // CRPT возвращает массив объектов
       const normalized = result.map(item => ({
-  		requestedCis: item.cisInfo?.requestedCis || '',
-  		status:        item.cisInfo?.status || 'NOT_FOUND',
-  		ownerName:     item.cisInfo?.ownerName || null,
-  		productName:   item.cisInfo?.productName || null,
-  		brand:         item.cisInfo?.brand || null,
-  		emissionDate:  item.cisInfo?.emissionDate || null,
-  		producedDate:  item.cisInfo?.producedDate || null,
-  		expirationDate:item.cisInfo?.expirationDate || null,
-  		tnVedEaes:     item.cisInfo?.tnVedEaes || null,
-  		productGroup:  item.cisInfo?.productGroup || null,
-  		errorCode:     item.errorCode || null,
-  		errorMessage:  item.errorMessage || null,
-	  }));
-	  allItems.push(...normalized);
+        requestedCis:  item.cisInfo?.requestedCis  || '',
+        status:        item.cisInfo?.status        || 'NOT_FOUND',
+        ownerName:     item.cisInfo?.ownerName     || null,
+        productName:   item.cisInfo?.productName   || null,
+        brand:         item.cisInfo?.brand         || null,
+        emissionDate:  item.cisInfo?.emissionDate  || null,
+        producedDate:  item.cisInfo?.producedDate  || null,
+        expirationDate:item.cisInfo?.expirationDate|| null,
+        tnVedEaes:     item.cisInfo?.tnVedEaes     || null,
+        productGroup:  item.cisInfo?.productGroup  || null,
+        errorCode:     item.errorCode              || null,
+        errorMessage:  item.errorMessage           || null,
+      }));
 
-      // Обновить прогресс в KV
+      allItems.push(...normalized);
+
       await this.env.JOBS.put(`status/${jobId}`, JSON.stringify({
         status: 'processing',
         totalCodes: codes.length,
@@ -113,26 +99,39 @@ export class ReportWorkflow extends WorkflowEntrypoint {
         startedAt: Date.now()
       }));
 
-      // Rate limit — 150ms между пачками
       if (i < chunks.length - 1) {
         await step.sleep(`pause-${i}`, '150 milliseconds');
       }
     }
 
-    // Шаг 3 — сгенерировать отчёт и PDF через контейнер
+    // Шаг 3 — сгенерировать отчёт через контейнер
     const reportResult = await step.do('generate-report', {
       retries: { limit: 2, delay: '10 seconds' }
     }, async () => {
       const container = getContainer(this.env.REPORT_CONTAINER, jobId);
 
+      const smtp = email ? {
+        host: this.env.SMTP_HOST,
+        port: this.env.SMTP_PORT,
+        user: this.env.SMTP_USER,
+        pass: this.env.SMTP_PASS,
+        from: this.env.SMTP_FROM,
+      } : null;
+
       const response = await container.fetch('http://container/generate-report', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId, items: allItems, email })
+        body: JSON.stringify({ jobId, items: allItems, email, smtp })
       });
 
-      if (!response.ok) throw new Error(`Report generation error: ${response.status}`);
+      if (!response.ok) throw new Error(`Report error: ${response.status}`);
       return response.json();
+    });
+
+    // Сохранить PDF в R2
+    const pdfKey = `reports/${jobId}/report.pdf`;
+    await this.env.FILES.put(pdfKey, base64ToArrayBuffer(reportResult.pdf), {
+      httpMetadata: { contentType: 'application/pdf' }
     });
 
     // Финальный статус
@@ -140,12 +139,12 @@ export class ReportWorkflow extends WorkflowEntrypoint {
       status: 'done',
       totalCodes: codes.length,
       processedCodes: codes.length,
-      pdfKey: reportResult.pdfKey,
+      pdfKey,
       summary: reportResult.summary,
       finishedAt: Date.now()
     }));
 
-    return reportResult;
+    return reportResult.summary;
   }
 }
 
@@ -169,7 +168,7 @@ export default {
       return new Response(null, { headers: CORS });
     }
 
-    // POST /api/upload — загрузка и парсинг файла
+    // POST /api/upload
     if (url.pathname === '/api/upload' && request.method === 'POST') {
       try {
         const formData = await request.formData();
@@ -182,9 +181,9 @@ export default {
 
         // Парсинг файла в контейнере
         const container = getContainer(env.REPORT_CONTAINER, `parse-${jobId}`);
+
         const parseForm = new FormData();
         parseForm.append('file', file);
-        parseForm.append('jobId', jobId);
 
         const parseResp = await container.fetch('http://container/parse', {
           method: 'POST',
@@ -196,7 +195,11 @@ export default {
           return json({ error: err.error || 'Parse error' }, 400);
         }
 
-        const { codesKey, count } = await parseResp.json();
+        const { codes, count } = await parseResp.json();
+
+        // Сохранить коды в R2
+        const codesKey = `codes/${jobId}/codes.json`;
+        await env.FILES.put(codesKey, JSON.stringify(codes));
 
         // Начальный статус
         await env.JOBS.put(`status/${jobId}`, JSON.stringify({
@@ -219,7 +222,7 @@ export default {
       }
     }
 
-    // GET /api/status/:jobId — прогресс обработки
+    // GET /api/status/:jobId
     if (url.pathname.startsWith('/api/status/')) {
       const jobId = url.pathname.split('/').pop();
       const raw = await env.JOBS.get(`status/${jobId}`);
@@ -227,7 +230,7 @@ export default {
       return json(JSON.parse(raw));
     }
 
-    // GET /api/report/:jobId — скачать PDF
+    // GET /api/report/:jobId
     if (url.pathname.startsWith('/api/report/')) {
       const jobId = url.pathname.split('/').pop();
       const raw = await env.JOBS.get(`status/${jobId}`);
