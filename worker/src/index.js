@@ -5,7 +5,7 @@ import { Container, getContainer } from "@cloudflare/containers";;
 
 export class ReportContainer extends Container {
   defaultPort = 8000;
-  sleepAfter = '5 minutes';
+  sleepAfter = '5m';
 }
 
 // ── Вспомогательные функции ──────────────────────────────
