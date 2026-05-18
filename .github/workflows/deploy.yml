@@ -69,18 +69,18 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
 
-      - name: Configure DockerHub registry
-        working-directory: worker
-        run: |
-          npx wrangler containers registries delete docker.io --skip-confirmation || true
-          printf '%s' '${{ secrets.DOCKERHUB_TOKEN }}' | \
-          npx wrangler containers registries configure docker.io \
-            --dockerhub-username=${{ secrets.DOCKERHUB_USERNAME }} \
-            --secret-name=dockerhub-token \
-            --skip-confirmation
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+#      - name: Configure DockerHub registry
+#        working-directory: worker
+#        run: |
+#          npx wrangler containers registries delete docker.io --skip-confirmation || true
+#          printf '%s' '${{ secrets.DOCKERHUB_TOKEN }}' | \
+#          npx wrangler containers registries configure docker.io \
+#            --dockerhub-username=${{ secrets.DOCKERHUB_USERNAME }} \
+#            --secret-name=dockerhub-token \
+#            --skip-confirmation
+#        env:
+#          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+#          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
 
       - name: Deploy Worker
         working-directory: worker
