@@ -115,5 +115,5 @@ jobs:
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          command: pages deploy dist --project-name=file-processor
+          command: pages deploy dist --project-name=file-processor --commit-dirty=true
           workingDirectory: frontend
