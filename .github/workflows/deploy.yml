@@ -72,6 +72,7 @@ jobs:
       - name: Configure DockerHub registry
         working-directory: worker
         run: |
+          npx wrangler containers registries delete docker.io --skip-confirmation || true
           printf '%s' '${{ secrets.DOCKERHUB_TOKEN }}' | \
           npx wrangler containers registries configure docker.io \
             --dockerhub-username=${{ secrets.DOCKERHUB_USERNAME }} \
