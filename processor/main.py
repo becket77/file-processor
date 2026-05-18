@@ -1,227 +1,306 @@
-import { WorkflowEntrypoint, Container } from 'cloudflare:workers';
+import re
+import html
+import json
+import io
+import os
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email.mime.text import MIMEText
+from email import encoders
 
-// ── Контейнер ────────────────────────────────────────────
+import boto3
+import openpyxl
+from fastapi import FastAPI, UploadFile, Form
+from fastapi.responses import JSONResponse
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
 
-export class ReportContainer extends Container {
-  defaultPort = 8000;
-  sleepAfter = '5 minutes';
-}
+app = FastAPI()
 
-// ── Вспомогательные функции ──────────────────────────────
+s3 = boto3.client(
+    's3',
+    endpoint_url=os.environ['R2_ENDPOINT'],
+    aws_access_key_id=os.environ['R2_ACCESS_KEY'],
+    aws_secret_access_key=os.environ['R2_SECRET_KEY'],
+    region_name='auto'
+)
+BUCKET = os.environ['R2_BUCKET']
 
-function chunkArray(arr, size) {
-  const chunks = [];
-  for (let i = 0; i < arr.length; i += size) {
-    chunks.push(arr.slice(i, i + size));
-  }
-  return chunks;
-}
+GS = '\x1d'
 
-async function getToken(env) {
-  const response = await fetch(env.TOKEN_SERVICE_URL);
-  if (!response.ok) throw new Error(`Token service error: ${response.status}`);
-  const data = await response.json();
-  return data.tkn;
-}
+def extract_code(raw: str) -> str | None:
+    code = raw.split(GS)[0].strip()
+    return code if len(code) >= 19 else None
 
-function getContainer(env, id) {
-  return env.REPORT_CONTAINER.get(
-    env.REPORT_CONTAINER.idFromName(id)
-  );
-}
+def parse_xml(content: bytes) -> list[str]:
+    text = content.decode('utf-8')
+    pattern = r'<catESAD_cu:IdentifacationMeansUnitCharacterValueId>(.*?)</catESAD_cu:IdentifacationMeansUnitCharacterValueId>'
+    raw_codes = re.findall(pattern, text, re.DOTALL)
+    codes = []
+    for code in raw_codes:
+        parsed = extract_code(html.unescape(code.strip()))
+        if parsed:
+            codes.append(parsed)
+    return codes
 
-// ── Workflow ─────────────────────────────────────────────
+def parse_csv(content: bytes) -> list[str]:
+    text = content.decode('utf-8-sig')
+    codes = []
+    for i, line in enumerate(text.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        first_col = line.split('\t')[0].strip()
+        if i == 0 and first_col and not first_col[0].isdigit():
+            continue
+        code = extract_code(first_col)
+        if code:
+            codes.append(code)
+    return codes
 
-export class ReportWorkflow extends WorkflowEntrypoint {
-  async run(event, step) {
-    const { jobId, codesKey, email } = event.payload;
+def parse_xls(content: bytes) -> list[str]:
+    wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    ws = wb.active
+    codes = []
+    for i, row in enumerate(ws.iter_rows(values_only=True)):
+        val = row[0] if row else None
+        if val is None:
+            continue
+        val = str(val).strip()
+        if i == 0 and val and not val[0].isdigit():
+            continue
+        code = extract_code(val)
+        if code:
+            codes.append(code)
+    return codes
 
-    // Шаг 1 — загрузить коды из R2
-    const codes = await step.do('load-codes', async () => {
-      const obj = await this.env.FILES.get(codesKey);
-      const text = await obj.text();
-      return JSON.parse(text);
-    });
+def fmt_date(d: str | None) -> str:
+    if not d:
+        return ''
+    return d[:7]
 
-    await this.env.JOBS.put(`status/${jobId}`, JSON.stringify({
-      status: 'processing',
-      totalCodes: codes.length,
-      processedCodes: 0,
-      startedAt: Date.now()
-    }));
+def aggregate(items: list[dict]) -> dict:
+    by_status = {}
+    by_owner = {}
+    by_product_group = {}
+    by_brand = {}
+    by_emission_date = {}
+    by_produced_date = {}
+    not_found = 0
+    errors = {}
 
-    // Шаг 2 — запросы к CRPT API пачками по 1000
-    const chunks = chunkArray(codes, 1000);
-    const allItems = [];
+    for item in items:
+        status = item.get('status') or 'NOT_FOUND'
+        by_status[status] = by_status.get(status, 0) + 1
 
-    for (let i = 0; i < chunks.length; i++) {
-      const result = await step.do(`api-batch-${i}`, {
-        retries: { limit: 3, delay: '15 seconds', backoff: 'linear' }
-      }, async () => {
-        const token = await getToken(this.env);
+        err_code = item.get('errorCode')
+        if err_code:
+            errors[err_code] = errors.get(err_code, 0) + 1
 
-        const response = await fetch(this.env.EXTERNAL_API_URL, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
-          body: JSON.stringify(chunks[i])
-        });
+        if status == 'NOT_FOUND':
+            not_found += 1
+            continue
 
-        if (!response.ok) {
-          throw new Error(`CRPT API error: ${response.status}`);
+        owner = item.get('ownerName')
+        if owner:
+            by_owner[owner] = by_owner.get(owner, 0) + 1
+
+        pg = item.get('productGroup')
+        if pg:
+            by_product_group[pg] = by_product_group.get(pg, 0) + 1
+
+        brand = item.get('brand')
+        if brand:
+            by_brand[brand] = by_brand.get(brand, 0) + 1
+
+        em = fmt_date(item.get('emissionDate'))
+        if em:
+            by_emission_date[em] = by_emission_date.get(em, 0) + 1
+
+        pr = fmt_date(item.get('producedDate'))
+        if pr:
+            by_produced_date[pr] = by_produced_date.get(pr, 0) + 1
+
+    total = len(items)
+    return {
+        'items': items,
+        'summary': {
+            'total': total,
+            'found': total - not_found,
+            'notFound': not_found,
+            'byStatus': dict(sorted(by_status.items(), key=lambda x: -x[1])),
+            'byOwner': dict(sorted(by_owner.items(), key=lambda x: -x[1])[:50]),
+            'byProductGroup': dict(sorted(by_product_group.items(), key=lambda x: -x[1])),
+            'byBrand': dict(sorted(by_brand.items(), key=lambda x: -x[1])[:50]),
+            'byEmissionDate': dict(sorted(by_emission_date.items())),
+            'byProducedDate': dict(sorted(by_produced_date.items())),
+            'errors': dict(sorted(errors.items(), key=lambda x: -x[1])),
         }
-
-        return response.json();
-      });
-
-      // CRPT возвращает массив объектов
-      allItems.push(...(Array.isArray(result) ? result : result.codes || []));
-
-      // Обновить прогресс в KV
-      await this.env.JOBS.put(`status/${jobId}`, JSON.stringify({
-        status: 'processing',
-        totalCodes: codes.length,
-        processedCodes: Math.min((i + 1) * 1000, codes.length),
-        startedAt: Date.now()
-      }));
-
-      // Rate limit — 150ms между пачками
-      if (i < chunks.length - 1) {
-        await step.sleep(`pause-${i}`, '150 milliseconds');
-      }
     }
 
-    // Шаг 3 — сгенерировать отчёт и PDF через контейнер
-    const reportResult = await step.do('generate-report', {
-      retries: { limit: 2, delay: '10 seconds' }
-    }, async () => {
-      const container = getContainer(this.env, jobId);
+HEADER_COLOR = colors.HexColor('#0051c3')
+ROW_COLORS = [colors.white, colors.HexColor('#f5f5f5')]
 
-      const response = await container.fetch('http://container/generate-report', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId, items: allItems, email })
-      });
+def make_table(data, col_widths):
+    t = Table(data, colWidths=col_widths, repeatRows=1)
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), HEADER_COLOR),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+        ('FONTSIZE', (0, 0), (-1, -1), 8),
+        ('GRID', (0, 0), (-1, -1), 0.4, colors.grey),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), ROW_COLORS),
+        ('PADDING', (0, 0), (-1, -1), 4),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+    ]))
+    return t
 
-      if (!response.ok) throw new Error(`Report generation error: ${response.status}`);
-      return response.json();
-    });
+def section(elements, title, data, col_widths, styles):
+    elements.append(Paragraph(title, styles['Heading2']))
+    elements.append(Spacer(1, 4))
+    elements.append(make_table(data, col_widths))
+    elements.append(Spacer(1, 14))
 
-    // Финальный статус
-    await this.env.JOBS.put(`status/${jobId}`, JSON.stringify({
-      status: 'done',
-      totalCodes: codes.length,
-      processedCodes: codes.length,
-      pdfKey: reportResult.pdfKey,
-      summary: reportResult.summary,
-      finishedAt: Date.now()
-    }));
+def generate_pdf(job_id: str, report: dict) -> bytes:
+    summary = report['summary']
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4,
+                            rightMargin=35, leftMargin=35,
+                            topMargin=35, bottomMargin=35)
+    styles = getSampleStyleSheet()
+    el = []
 
-    return reportResult;
-  }
-}
+    el.append(Paragraph('Otchet po kodam markirovki', styles['Title']))
+    el.append(Paragraph(f'Job ID: {job_id}', styles['Normal']))
+    el.append(Spacer(1, 14))
 
-// ── Worker API ───────────────────────────────────────────
+    section(el, 'Svodnaya', [
+        ['Pokazatel', 'Znachenie'],
+        ['Vsego kodov', str(summary['total'])],
+        ['Naydeno', str(summary['found'])],
+        ['Ne naydeno', str(summary['notFound'])],
+    ], [330, 150], styles)
 
-const CORS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
-};
+    if summary['byStatus']:
+        section(el, 'Po statusam',
+            [['Status', 'Kolichestvo']] +
+            [[k, str(v)] for k, v in summary['byStatus'].items()],
+            [330, 150], styles)
 
-function json(data, status = 200) {
-  return Response.json(data, { status, headers: CORS });
-}
+    if summary['errors']:
+        section(el, 'Oshibki API',
+            [['Kod oshibki', 'Kolichestvo']] +
+            [[k, str(v)] for k, v in summary['errors'].items()],
+            [330, 150], styles)
 
-export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
+    if summary['byProductGroup']:
+        section(el, 'Po tovarnym gruppam',
+            [['Gruppa', 'Kolichestvo']] +
+            [[k, str(v)] for k, v in summary['byProductGroup'].items()],
+            [330, 150], styles)
 
-    if (request.method === 'OPTIONS') {
-      return new Response(null, { headers: CORS });
-    }
+    if summary['byOwner']:
+        section(el, 'Po vladeltsam (top 50)',
+            [['Vladetels', 'Kolichestvo']] +
+            [[k, str(v)] for k, v in summary['byOwner'].items()],
+            [380, 100], styles)
 
-    // POST /api/upload — загрузка и парсинг файла
-    if (url.pathname === '/api/upload' && request.method === 'POST') {
-      try {
-        const formData = await request.formData();
-        const file  = formData.get('file');
-        const email = formData.get('email') || null;
+    if summary['byBrand']:
+        section(el, 'Po brendam (top 50)',
+            [['Brend', 'Kolichestvo']] +
+            [[k, str(v)] for k, v in summary['byBrand'].items()],
+            [380, 100], styles)
 
-        if (!file) return json({ error: 'No file provided' }, 400);
+    if summary['byEmissionDate']:
+        section(el, 'Po date emissii',
+            [['Mesyats', 'Kolichestvo']] +
+            [[k, str(v)] for k, v in summary['byEmissionDate'].items()],
+            [330, 150], styles)
 
-        const jobId = crypto.randomUUID();
+    if summary['byProducedDate']:
+        section(el, 'Po date proizvodstva',
+            [['Mesyats', 'Kolichestvo']] +
+            [[k, str(v)] for k, v in summary['byProducedDate'].items()],
+            [330, 150], styles)
 
-        // Парсинг файла в контейнере
-        const container = getContainer(env, `parse-${jobId}`);
-        const parseForm = new FormData();
-        parseForm.append('file', file);
-        parseForm.append('jobId', jobId);
+    doc.build(el)
+    return buf.getvalue()
 
-        const parseResp = await container.fetch('http://container/parse', {
-          method: 'POST',
-          body: parseForm
-        });
+def send_email(to: str, job_id: str, summary: dict, pdf_bytes: bytes):
+    msg = MIMEMultipart()
+    msg['From'] = os.environ['SMTP_FROM']
+    msg['To'] = to
+    msg['Subject'] = f'Otchet po kodam markirovki - {summary["total"]} zapisey'
 
-        if (!parseResp.ok) {
-          const err = await parseResp.json();
-          return json({ error: err.error || 'Parse error' }, 400);
-        }
+    body = (
+        f'Obrabotka zavershena.\n\n'
+        f'Vsego kodov: {summary["total"]}\n'
+        f'Naydeno: {summary["found"]}\n'
+        f'Ne naydeno: {summary["notFound"]}\n\n'
+        f'Podrobny otchet vo vlozhenii.'
+    )
+    msg.attach(MIMEText(body, 'plain', 'utf-8'))
 
-        const { codesKey, count } = await parseResp.json();
+    part = MIMEBase('application', 'pdf')
+    part.set_payload(pdf_bytes)
+    encoders.encode_base64(part)
+    part.add_header('Content-Disposition', f'attachment; filename="report-{job_id}.pdf"')
+    msg.attach(part)
 
-        // Начальный статус
-        await env.JOBS.put(`status/${jobId}`, JSON.stringify({
-          status: 'processing',
-          totalCodes: count,
-          processedCodes: 0,
-          startedAt: Date.now()
-        }));
+    with smtplib.SMTP(os.environ['SMTP_HOST'], int(os.environ['SMTP_PORT'])) as srv:
+        srv.starttls()
+        srv.login(os.environ['SMTP_USER'], os.environ['SMTP_PASS'])
+        srv.send_message(msg)
 
-        // Запустить Workflow
-        await env.REPORT_WORKFLOW.create({
-          id: jobId,
-          params: { jobId, codesKey, email }
-        });
+@app.post('/parse')
+async def parse_file(file: UploadFile, jobId: str = Form(...)):
+    content = await file.read()
+    name = file.filename.lower()
 
-        return json({ jobId, totalCodes: count });
+    if name.endswith('.xml'):
+        codes = parse_xml(content)
+    elif name.endswith(('.xlsx', '.xls')):
+        codes = parse_xls(content)
+    elif name.endswith(('.csv', '.txt')):
+        codes = parse_csv(content)
+    else:
+        return JSONResponse({'error': f'Unsupported format: {name}'}, status_code=400)
 
-      } catch (e) {
-        return json({ error: e.message }, 500);
-      }
-    }
+    codes = list(dict.fromkeys(codes))
 
-    // GET /api/status/:jobId — прогресс обработки
-    if (url.pathname.startsWith('/api/status/')) {
-      const jobId = url.pathname.split('/').pop();
-      const raw = await env.JOBS.get(`status/${jobId}`);
-      if (!raw) return json({ error: 'Job not found' }, 404);
-      return json(JSON.parse(raw));
-    }
+    key = f'codes/{jobId}/codes.json'
+    s3.put_object(Bucket=BUCKET, Key=key, Body=json.dumps(codes, ensure_ascii=False))
 
-    // GET /api/report/:jobId — скачать PDF
-    if (url.pathname.startsWith('/api/report/')) {
-      const jobId = url.pathname.split('/').pop();
-      const raw = await env.JOBS.get(`status/${jobId}`);
-      if (!raw) return json({ error: 'Job not found' }, 404);
+    return {'codesKey': key, 'count': len(codes)}
 
-      const status = JSON.parse(raw);
-      if (status.status !== 'done') return json({ error: 'Not ready yet' }, 202);
+@app.post('/generate-report')
+async def generate_report(payload: dict):
+    job_id = payload['jobId']
+    report = aggregate(payload['items'])
 
-      const pdf = await env.FILES.get(status.pdfKey);
-      if (!pdf) return json({ error: 'PDF not found' }, 404);
+    pdf_bytes = generate_pdf(job_id, report)
+    pdf_key = f'reports/{job_id}/report.pdf'
+    s3.put_object(Bucket=BUCKET, Key=pdf_key, Body=pdf_bytes, ContentType='application/pdf')
 
-      return new Response(pdf.body, {
-        headers: {
-          'Content-Type': 'application/pdf',
-          'Content-Disposition': `attachment; filename="report-${jobId}.pdf"`,
-          ...CORS
-        }
-      });
-    }
+    email = payload.get('email')
+    if email:
+        try:
+            send_email(email, job_id, report['summary'], pdf_bytes)
+        except Exception as e:
+            print(f'Email error: {e}')
 
-    return json({ error: 'Not found' }, 404);
-  }
-};
+    s3.put_object(
+        Bucket=BUCKET,
+        Key=f'reports/{job_id}/summary.json',
+        Body=json.dumps(report['summary'], ensure_ascii=False)
+    )
+
+    return {'pdfKey': pdf_key, 'summary': report['summary']}
+
+@app.get('/health')
+async def health():
+    return {'ok': True}
