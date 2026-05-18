@@ -47,7 +47,7 @@ jobs:
       - name: Update image tag in wrangler.toml
         working-directory: worker
         run: |
-          IMAGE="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/file-processor:sha-$(git rev-parse --short HEAD)"
+          IMAGE="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/file-processor:sha-$(git rev-parse HEAD)"
           sed -i "s|image = .*|image = \"$IMAGE\"|" wrangler.toml
           grep image wrangler.toml
 
