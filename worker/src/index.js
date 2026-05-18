@@ -7,18 +7,20 @@ export class ReportContainer extends Container {
   defaultPort = 8000;
   sleepAfter = '5m';
 
-  get envVars() {
-    return {
-      R2_ENDPOINT:   this.env.R2_ENDPOINT,
-      R2_ACCESS_KEY: this.env.R2_ACCESS_KEY,
-      R2_SECRET_KEY: this.env.R2_SECRET_KEY,
-      R2_BUCKET:     this.env.R2_BUCKET,
-      SMTP_HOST:     this.env.SMTP_HOST,
-      SMTP_PORT:     this.env.SMTP_PORT,
-      SMTP_USER:     this.env.SMTP_USER,
-      SMTP_PASS:     this.env.SMTP_PASS,
-      SMTP_FROM:     this.env.SMTP_FROM,
-    };
+  async containerStart() {
+    await this.startAndWaitForPorts({
+      envVars: {
+        R2_ENDPOINT:   this.env.R2_ENDPOINT,
+        R2_ACCESS_KEY: this.env.R2_ACCESS_KEY,
+        R2_SECRET_KEY: this.env.R2_SECRET_KEY,
+        R2_BUCKET:     this.env.R2_BUCKET,
+        SMTP_HOST:     this.env.SMTP_HOST,
+        SMTP_PORT:     this.env.SMTP_PORT,
+        SMTP_USER:     this.env.SMTP_USER,
+        SMTP_PASS:     this.env.SMTP_PASS,
+        SMTP_FROM:     this.env.SMTP_FROM,
+      }
+    });
   }
 }
 
