@@ -1,5 +1,3 @@
-name: Deploy
-
 on:
   push:
     branches: [main]
@@ -14,32 +12,21 @@ jobs:
   build-container:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
-    outputs:
-      image_tag: ${{ steps.meta.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Login to GitHub Container Registry
+      - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/becket77/file-processor
-          tags: |
-            type=sha,format=short
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: ./processor
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/file-processor:sha-${{ github.sha }}
 
   deploy-worker:
     runs-on: ubuntu-latest
@@ -60,9 +47,8 @@ jobs:
       - name: Update image tag in wrangler.toml
         working-directory: worker
         run: |
-          IMAGE="ghcr.io/becket77/file-processor:sha-$(git rev-parse --short HEAD)"
+          IMAGE="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/file-processor:sha-$(git rev-parse --short HEAD)"
           sed -i "s|image = .*|image = \"$IMAGE\"|" wrangler.toml
-          echo "Using image: $IMAGE"
           grep image wrangler.toml
 
       - name: Set Worker secrets
@@ -83,12 +69,13 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
 
-      - name: Configure ghcr.io registry
+      - name: Configure DockerHub registry
         working-directory: worker
         run: |
-          printf '%s' '${{ secrets.GITHUB_TOKEN }}' | \
-          npx wrangler containers registries configure ghcr.io \
-            --secret-name=ghcr-token \
+          printf '%s' '${{ secrets.DOCKERHUB_TOKEN }}' | \
+          npx wrangler containers registries configure docker.io \
+            --dockerhub-username=${{ secrets.DOCKERHUB_USERNAME }} \
+            --secret-name=dockerhub-token \
             --skip-confirmation
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
