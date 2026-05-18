@@ -108,7 +108,7 @@ jobs:
           npm ci
           npm run build
         env:
-          VITE_API_URL: https://file-processor.${{ secrets.CF_ACCOUNT_ID }}.workers.dev
+          VITE_API_URL: https://file-processor.4de3119bd7256b9c34ea765a324597bc.workers.dev
 
       - name: Deploy to Pages
         uses: cloudflare/wrangler-action@v4
